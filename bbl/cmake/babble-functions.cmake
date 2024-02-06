@@ -49,7 +49,6 @@ function(BBL_TRANSLATE_BINDING PROJECT_NAME)
         string(REPLACE "\n" " -isystem " gcc_include_list "-isystem ${gcc_default_includes}")
         string(REPLACE "(framework directory)" "" gcc_include_list ${gcc_include_list})
         string(REPLACE " " ";" gcc_include_list ${gcc_include_list})
-        message(STATUS "${gcc_include_list}")
     endif()
 
     add_custom_command(
