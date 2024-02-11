@@ -147,8 +147,8 @@ install(
     ${CMAKE_INSTALL_LIBDIR}/cmake/babble
 )
 
-if(NOT DEFINED LIBCLANG_DIR)
-  set(LIBCLANG_DIR ${CLANG_INSTALL_PREFIX})
+if(NOT DEFINED BBL_CLANG_INCLUDE_DIR)
+  set(BBL_CLANG_INCLUDE_DIR ${CLANG_INSTALL_PREFIX}/lib/clang/${LLVM_VERSION_MAJOR}/include)
 endif()
 
 # copy the clang resource dir to the installation so we can pick up the headers
@@ -156,7 +156,7 @@ endif()
 # llvm installation
 install(
   DIRECTORY
-    ${LIBCLANG_DIR}/lib/clang/${LLVM_VERSION_MAJOR}/include
+    ${BBL_CLANG_INCLUDE_DIR}
     DESTINATION
       ${CMAKE_INSTALL_LIBDIR}/resource
 )
@@ -164,7 +164,7 @@ install(
 # also copy it to the binary dir so we can pick it up in the test runner
 file(
   COPY
-    ${LIBCLANG_DIR}/lib/clang/${LLVM_VERSION_MAJOR}/include
+    ${BBL_CLANG_INCLUDE_DIR}
   DESTINATION
     ${CMAKE_BINARY_DIR}
 )
