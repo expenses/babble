@@ -74,7 +74,7 @@ target_link_libraries(bbl-genbind
 if(UNIX)
   target_compile_options(bbl PUBLIC -Wno-deprecated-declarations)
   target_compile_options(bbl-genbind PUBLIC -Wno-deprecated-declarations)
-else()
+elif(MSVC)
   target_compile_options(bbl PUBLIC /bigobj)
 endif()
 
