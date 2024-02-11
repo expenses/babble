@@ -9,7 +9,7 @@
 #include <unordered_map>
 
 #ifdef _WIN32
-#include <Windows.h>
+#include <windows.h>
 #include <libloaderapi.h>
 using PluginHandle =  HINSTANCE;
 #else
