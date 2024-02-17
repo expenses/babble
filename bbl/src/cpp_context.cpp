@@ -592,9 +592,6 @@ auto Context::extract_class_binding(
     std::vector<std::string> const& inherits_from,
     clang::MangleContext* mangle_ctx) -> Class {
     std::string id = get_mangled_name(crd, mangle_ctx);
-    if (_decl_maps.class_map.contains(id)) {
-        BBL_THROW("class binding for id {} already exists", id);
-    }
 
     std::string qualified_name = crd->getQualifiedNameAsString();
     std::string name = crd->getNameAsString();
@@ -623,27 +620,31 @@ auto Context::extract_class_binding(
         all_method_signatures.emplace(generate_method_signature(cmd));
     }
 
-    return Class{this,
-                 qualified_name,
-                 spelling,
-                 name,
-                 rename,
-                 comment,
-                 std::move(template_args),
-                 std::vector<std::string>(), // methods
-                 std::vector<std::string>(), // constructors
-                 std::vector<Field>(),       // fields
-                 {},                         // smartptr_to
-                 false,                      // smartptr_is_const
-                 inherits_from,
-                 layout,
-                 bind_kind,
-                 rule_of_seven,
-                 is_abstract,
-                 is_superclass,
-                 id,
-                 {}, // pointee methods
-                 all_method_signatures};
+    return Class{
+        this,
+        qualified_name,
+        spelling,
+        name,
+        rename,
+        comment,
+        std::move(template_args),
+        std::vector<std::string>(), // methods
+        std::vector<std::string>(), // constructors
+        std::vector<Field>(),       // fields
+        {},                         // smartptr_to
+        false,                      // smartptr_is_const
+        inherits_from,
+        layout,
+        bind_kind,
+        rule_of_seven,
+        is_abstract,
+        is_superclass,
+        id,
+        {},                         // pointee methods
+        all_method_signatures,
+        false,                      // ignore_all_unbound
+        {}                          // bound_method_signatures
+    };
 }
 
 auto Context::insert_class_binding(std::string const& mod_id,
@@ -1527,6 +1528,29 @@ extract_class_from_construct_expr(clang::CXXConstructExpr const* construct_expr,
     clang::CXXRecordDecl const* type_record_decl =
         get_record_to_extract_from_construct_expr(construct_expr);
 
+    // Get a version of the spelling of the class by printing the expr
+    // For some reason, when we pass a rename string to the Class() constructor,
+    // the pretty printer decides to only print that string. The full expression
+    // can be got from the parent CXXFunctionCastExpr
+    std::string class_spelling;
+    if (auto const* fce =
+            find_first_ancestor_of_type<clang::CXXFunctionalCastExpr>(
+                construct_expr, ast_context)) {
+        class_spelling = expr_to_string(fce, ast_context);
+    } else {
+        class_spelling = expr_to_string(construct_expr, ast_context);
+    }
+
+    class_spelling =
+        class_spelling.substr(class_spelling.find_first_of("<") + 1);
+    class_spelling = class_spelling.substr(0, class_spelling.find_last_of(">"));
+
+    std::string class_id = get_mangled_name(type_record_decl, mangle_context);
+    if (bbl_ctx->has_class(class_id)) {
+        SPDLOG_WARN("class {} is already bound. Ignoring second binding.", class_spelling);
+        return;
+    }
+
     Layout layout = get_record_layout(construct_expr, *ast_context);
     BindKind bind_kind =
         search_for_bind_kind_calls(construct_expr, *ast_context);
@@ -1587,23 +1611,6 @@ extract_class_from_construct_expr(clang::CXXConstructExpr const* construct_expr,
         bbl_ctsd, "has_virtual_destructor", *ast_context);
     bool is_abstract =
         evaluate_field_expression_bool(bbl_ctsd, "is_abstract", *ast_context);
-
-    // Get a version of the spelling of the class by printing the expr
-    // For some reason, when we pass a rename string to the Class() constructor,
-    // the pretty printer decides to only print that string. The full expression
-    // can be got from the parent CXXFunctionCastExpr
-    std::string class_spelling;
-    if (auto const* fce =
-            find_first_ancestor_of_type<clang::CXXFunctionalCastExpr>(
-                construct_expr, ast_context)) {
-        class_spelling = expr_to_string(fce, ast_context);
-    } else {
-        class_spelling = expr_to_string(construct_expr, ast_context);
-    }
-
-    class_spelling =
-        class_spelling.substr(class_spelling.find_first_of("<") + 1);
-    class_spelling = class_spelling.substr(0, class_spelling.find_last_of(">"));
 
     // finally grab the rename string the user's provided (if any)
     std::string rename_str;
@@ -2031,6 +2038,20 @@ extract_wrapped_method_from_decl_ref_expr(clang::DeclRefExpr const* dre,
         bbl_ctx->insert_function_binding(
             mod_id, mangled_name, std::move(function));
 
+        // remove the signature from the class
+        std::string target_class_id =
+            get_mangled_name(crd_target, mangle_context);
+        std::string method_sig = generate_method_signature(cmd);
+        bbl::Class* cls = bbl_ctx->get_class(target_class_id);
+        if (!cls) {
+            // this shouldn't be possible in the bindings, but just to make sure
+            BBL_THROW("method {} is targeting class {} but this class "
+                      "is not extracted",
+                      cmd->getQualifiedNameAsString(),
+                      crd_target->getQualifiedNameAsString());
+        }
+        cls->all_method_signatures.erase(method_sig);
+        cls->bound_method_signiatures.insert(method_sig);
     } catch (std::exception& e) {
         BBL_RETHROW(
             e, "could not bind method {}", cmd->getQualifiedNameAsString());
@@ -2140,6 +2161,7 @@ extract_ignore_method_from_decl_ref_expr(clang::DeclRefExpr const* dre,
     // get the method signature and remove it from the class's methods list
     std::string method_sig = generate_method_signature(cmd);
     cls->all_method_signatures.erase(method_sig);
+    cls->bound_method_signiatures.insert(method_sig);
 }
 
 static auto
@@ -2262,7 +2284,7 @@ extract_method_from_decl_ref_expr(clang::DeclRefExpr const* dre,
                         "{}, ignoring "
                         "second binding",
                         cmd->getQualifiedNameAsString(),
-                        cls->qualified_name);
+                        cls->spelling);
         } else {
             cls->methods.push_back(method_id);
         }
@@ -2279,12 +2301,88 @@ extract_method_from_decl_ref_expr(clang::DeclRefExpr const* dre,
             bbl_ctx->insert_method_binding(method_id, std::move(method));
             std::string method_sig = generate_method_signature(cmd);
             cls->all_method_signatures.erase(method_sig);
+            cls->bound_method_signiatures.insert(method_sig);
             cls->methods.emplace_back(std::move(method_id));
         } catch (std::exception& e) {
             BBL_RETHROW(
                 e, "could not bind method {}", cmd->getQualifiedNameAsString());
         }
     }
+}
+
+static auto replace_all(std::string subject,
+                        std::string find,
+                        std::string replace) -> std::string {
+    size_t pos = 0;
+    while ((pos = subject.find(find, pos)) != std::string::npos) {
+        subject.replace(pos, find.length(), replace);
+        pos += replace.length();
+    }
+    return subject;
+}
+
+static auto
+extract_lambda_as_function_impl(clang::LambdaExpr const* le,
+                                bbl::Context* bbl_ctx,
+                                std::string const& mod_id,
+                                std::string const& function_name,
+                                std::string const& rename_str,
+                                std::string const& comment,
+                                clang::ASTContext* ast_context,
+                                clang::SourceManager& sm,
+                                clang::MangleContext* mangle_context) {
+    // extract the wrapping lambda and insert it as a new
+    // function in bblext:: that we'll call instead of the
+    // original method
+    // get the lambda source from the bindfile and take
+    // everything from the opening parentheses to get the impl
+    clang::CXXMethodDecl const* lambda_decl = le->getCallOperator();
+#if 0
+    std::string lambda_source = get_source_text(le->getSourceRange(), sm);
+    lambda_source =
+        lambda_source.substr(lambda_source.find("("), std::string::npos);
+#else
+    std::string lambda_source = decl_to_string(lambda_decl, ast_context);
+    lambda_source = lambda_source.substr(lambda_source.find("operator()") + 10,
+                                         std::string::npos);
+    lambda_source = replace_all(lambda_source, ") const -> ", ") -> ");
+#endif
+
+    // the lambda name is just the function name
+    // concatenated
+    std::string lambda_name = rename_str.empty() ? function_name : rename_str;
+
+    // extract the lambda decl as a function
+    bbl::Function function = bbl_ctx->extract_function_binding(
+        lambda_decl,
+        rename_str,
+        // because we're converting our lambda to a direct function impl
+        // it will be placed in the bblext namespace
+        fmt::format("bblext::{}", lambda_name),
+        "",
+        // take the doc comment from the wrapped method decl
+        comment,
+        mangle_context);
+
+    // override the extracted function name with the lambda name because
+    // the lambda function itself is operator()
+    function.name = lambda_name;
+    function.rename = "";
+
+    // the lambda source has the parameter list, trailing return and body
+    // already, just add a prefixing "auto" and the name
+    std::string lambda_impl =
+        fmt::format("auto {}{}", lambda_name, lambda_source);
+
+    // mangle the lambda as an id
+    std::string mangled_name = get_mangled_name(lambda_decl, mangle_context);
+
+    // insert the generated lambda function impl.
+    // this will go in the bblext namespace
+    bbl_ctx->insert_function_impl(mod_id, lambda_impl);
+
+    // insert the generated function binding
+    bbl_ctx->insert_function_binding(mod_id, mangled_name, std::move(function));
 }
 
 static auto
@@ -2325,6 +2423,27 @@ extract_function_from_decl_ref_expr(clang::DeclRefExpr const* dre_fn,
         rename_str = rename_literal->getString().str();
     }
 
+    std::string mod_id;
+    if (!find_containing_module(dre_fn, ast_context, mangle_context, mod_id)) {
+        BBL_THROW("could not find containing module for {}",
+                  get_source_text(dre_fn->getSourceRange(),
+                                  ast_context->getSourceManager()));
+    }
+
+    // first try and find a lambda expression for the direct lambda binding case
+    if (auto const* le = find_first_child_of_type<clang::LambdaExpr>(ce)) {
+        extract_lambda_as_function_impl(le,
+                                        bbl_ctx,
+                                        mod_id,
+                                        rename_str,
+                                        rename_str,
+                                        "",
+                                        ast_context,
+                                        sm,
+                                        mangle_context);
+        return;
+    }
+
     clang::DeclRefExpr const* dre_target = nullptr;
     visit_subtree(ce, [&](clang::Stmt const* stmt) -> bool {
         // Both the DeclRefExpr we want to bind as well as the `bbl::fn` one
@@ -2339,7 +2458,8 @@ extract_function_from_decl_ref_expr(clang::DeclRefExpr const* dre_fn,
 
     if (dre_target == nullptr) {
         dre_fn->dumpColor();
-        BBL_THROW("Got unexpected set of DeclRefExprs");
+        BBL_THROW("Got unexpected set of DeclRefExprs from fn CallExpr at {}",
+                  get_source_and_location(ce, sm));
     }
 
     std::string spelling = expr_to_string(dre_target, ast_context);
@@ -2347,7 +2467,8 @@ extract_function_from_decl_ref_expr(clang::DeclRefExpr const* dre_fn,
     auto const* fd = llvm::dyn_cast<clang::FunctionDecl>(dre_target->getDecl());
 
     if (fd == nullptr) {
-        BBL_THROW("got decl ref expr but decl is not FunctionDecl");
+        BBL_THROW("got decl ref expr but decl is not FunctionDecl at {}",
+                  get_source_and_location(dre_target, sm));
     }
 
     // Handle templated calls. These are calls that require spelling one
@@ -2381,13 +2502,6 @@ extract_function_from_decl_ref_expr(clang::DeclRefExpr const* dre_fn,
 
     std::string comment = get_comment_from_decl(fd, ast_context);
 
-    std::string mod_id;
-    if (!find_containing_module(dre_fn, ast_context, mangle_context, mod_id)) {
-        BBL_THROW("could not find containing module for {}",
-                  get_source_text(dre_fn->getSourceRange(),
-                                  ast_context->getSourceManager()));
-    }
-
     // check if there's a wrapper lambda under the CallExpr
     if (auto const* ctoe =
             find_first_child_of_type<clang::CXXTemporaryObjectExpr>(ce)) {
@@ -2410,54 +2524,15 @@ extract_function_from_decl_ref_expr(clang::DeclRefExpr const* dre_fn,
                       location_to_string(ctoe, sm));
         }
 
-        // extract the wrapping lambda and insert it as a new
-        // function in bblext:: that we'll call instead of the
-        // original method
-        // get the lambda source from the bindfile and take
-        // everything from the opening parentheses to get the impl
-        clang::CXXMethodDecl const* lambda_decl = le->getCallOperator();
-        std::string lambda_source = get_source_text(le->getSourceRange(), sm);
-        lambda_source =
-            lambda_source.substr(lambda_source.find("("), std::string::npos);
-
-        // the lambda name is just the function name
-        // concatenated
-        std::string lambda_name =
-            rename_str.empty() ? fd->getNameAsString() : rename_str;
-
-        // extract the lambda decl as a function
-        bbl::Function function = bbl_ctx->extract_function_binding(
-            lambda_decl,
-            rename_str,
-            // because we're converting our lambda to a direct function impl
-            // it will be placed in the bblext namespace
-            fmt::format("bblext::{}", lambda_name),
-            "",
-            // take the doc comment from the wrapped method decl
-            comment,
-            mangle_context);
-
-        // override the extracted function name with the lambda name because
-        // the lambda function itself is operator()
-        function.name = lambda_name;
-        function.rename = "";
-
-        // the lambda source has the parameter list, trailing return and body
-        // already, just add a prefixing "auto" and the name
-        std::string lambda_impl =
-            fmt::format("auto {}{}", lambda_name, lambda_source);
-
-        // mangle the lambda as an id
-        std::string mangled_name =
-            get_mangled_name(lambda_decl, mangle_context);
-
-        // insert the generated lambda function impl.
-        // this will go in the bblext namespace
-        bbl_ctx->insert_function_impl(mod_id, lambda_impl);
-
-        // insert the generated function binding
-        bbl_ctx->insert_function_binding(
-            mod_id, mangled_name, std::move(function));
+        extract_lambda_as_function_impl(le,
+                                        bbl_ctx,
+                                        mod_id,
+                                        fd->getNameAsString(),
+                                        rename_str,
+                                        comment,
+                                        ast_context,
+                                        sm,
+                                        mangle_context);
 
     } else {
         // Just extract the function
@@ -2983,9 +3058,9 @@ public:
                         _sm,
                         _mangle_context.get());
                 } else {
-                    SPDLOG_WARN(
-                        "got CMCE but its name is {}",
-                        cmce->getMethodDecl()->getQualifiedNameAsString());
+                    // SPDLOG_WARN(
+                    //     "got CMCE but its name is {}",
+                    //     cmce->getMethodDecl()->getQualifiedNameAsString());
                 }
             } else {
                 /// XXX: this probably means we're inside the lambda body of a
@@ -3172,6 +3247,7 @@ auto Context::compile_and_extract(int argc, char const** argv) noexcept(false)
         for (std::string const& class_id : mod.classes) {
             Class& cls = _decl_maps.class_map.at(class_id);
             std::vector<std::string> inherited_method_ids;
+            ankerl::unordered_dense::set<std::string> sigs_to_erase;
             std::vector<std::string> bound_method_signiatures;
 
             for (std::string const& method_id : cls.methods) {
@@ -3208,10 +3284,18 @@ auto Context::compile_and_extract(int argc, char const** argv) noexcept(false)
                                      cls.spelling);
                     }
                 }
+
+                for (std::string const& sig: supercls.bound_method_signiatures) {
+                    sigs_to_erase.insert(sig);
+                }
             }
 
             for (std::string const& method_id : inherited_method_ids) {
                 cls.methods.push_back(method_id);
+            }
+
+            for (std::string const& sig: sigs_to_erase) {
+                cls.all_method_signatures.erase(sig);
             }
         }
 
